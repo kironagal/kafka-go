@@ -6,6 +6,7 @@ import(
 	"fmt"
 	"net/http"
 	"time"
+	"encoding/json"
 	"github.com/gin-gonic/gin"
 	"github.com/segmentio/kafka-go"
 
@@ -19,6 +20,12 @@ type KafkaMessage struct {
 	Offset int64  `json:"offset"`
 	Topic string `json:"topic"`
 	Partition int `json:"partition"`
+}
+
+type EventPayload struct {
+	User string `json:"user"`
+	Event string `json:"event"`
+	TimeStamp string `json:"timestamp"`
 }
 
 func main(){
@@ -35,9 +42,42 @@ func main(){
 	router := gin.Default()
 
 	//Route to handle produce Kafka message
-	router.POST("/produce", produceHandler)
+	//router.POST("/produce", produceHandler)
+	router.POST("/produce", func(c *gin.Context){
+		var payload EventPayload
+		if err := c.BindJSON(&payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error":"Invalid JSON"})
+			return
+		}
+	
+		//Convert struct to JSON string to send as message
+		msgBytes, err := json.Marshal(payload)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error":"failed to encode JSON"})
+			return
+		}
+	
+		writer := &kafka.Writer{
+			Addr: kafka.TCP("localhost:9092"),
+			Topic: "test-topic",
+			Balancer: &kafka.LeastBytes{},
+		}
+	
+		err = writer.WriteMessages(context.Background(), kafka.Message{
+			Key: []byte(payload.User),
+			Value: msgBytes,
+		},
+	)
+	
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error":"failed to send message"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status":"message sent"})
+	})
 	router.GET("/consume", consumeHandler)
 	router.GET("/stream", streamHandler)
+	router.StaticFile("/dashboard", "./dashboard.html")
 
 	//Run API on port 8080
 	log.Println("API running on localhost:8080")
@@ -167,7 +207,8 @@ func streamHandler(c *gin.Context){
 				continue
 			}
 			
-			data := fmt.Sprintf("data: {\"key\": \"%s\", \"value\": \"%s\",}\n\n", msg.Key, msg.Value)
+			data := fmt.Sprintf("data:%s\n\n", msg.Value) 
+
 			_, err = c.Writer.Write([]byte(data))
 			if err != nil {
 				log.Printf("Client write error: %v", err)
