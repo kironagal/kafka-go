@@ -3,6 +3,7 @@ package main
 import(
 	"context"
 	"log"
+	"fmt"
 	"net/http"
 	"time"
 	"github.com/gin-gonic/gin"
@@ -36,6 +37,7 @@ func main(){
 	//Route to handle produce Kafka message
 	router.POST("/produce", produceHandler)
 	router.GET("/consume", consumeHandler)
+	router.GET("/stream", streamHandler)
 
 	//Run API on port 8080
 	log.Println("API running on localhost:8080")
@@ -132,4 +134,46 @@ func consumeHandler(c *gin.Context){
 	// 	Topic: msg.Topic,
 	// 	Partition: msg.Partition,
 	// })
+}
+
+func streamHandler(c *gin.Context){
+	c.Writer.Header().Set("Content-Type","text/event-stream")
+	c.Writer.Header().Set("Cache-Control","no-cache")
+	c.Writer.Header().Set("Connection","keep-alive")
+	c.Writer.Flush()
+
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers: []string{"localhost:9092"},
+		Topic: "test-topic",
+		GroupID: "go-stream-consumer",
+		MinBytes: 1,
+		MaxBytes: 10e6,
+	})
+
+	defer reader.Close()
+
+	ctx := c.Request.Context()
+
+	for {
+		select {
+		case <- ctx.Done():
+			log.Println("Client disconnected")
+			return
+		default:
+			msg, err :=reader.ReadMessage(ctx)
+			if err != nil {
+				log.Printf("Kafka read error: %v\n", err)
+				time.Sleep(1 * time.Second) // Sleep for a second before retrying
+				continue
+			}
+			
+			data := fmt.Sprintf("data: {\"key\": \"%s\", \"value\": \"%s\",}\n\n", msg.Key, msg.Value)
+			_, err = c.Writer.Write([]byte(data))
+			if err != nil {
+				log.Printf("Client write error: %v", err)
+				return
+			}
+			c.Writer.Flush()
+		}
+	}
 }
