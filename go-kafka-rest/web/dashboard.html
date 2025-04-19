@@ -24,19 +24,22 @@
         <div id="log"></div>
         <script>
             const log = document.getElementById('log');
-            const eventSource = new EventSource('http://localhost:8080/stream');
+            const eventSource = new EventSource('/stream');
 
             eventSource.onmessage = function(event) {
                 const data = JSON.parse(event.data);
                 const div = document.createElement('div');
                 div.className = 'message';
-                div.textContent = `Key: ${data.key}, Value: ${data.Value}`;
+                div.textContent = `${data.user} ${data.event} @ ${data.timestamp}`;
                 log.prepend(div);
             };
 
             eventSource.onerror = function(event) {
                 console.error("EventSource failed:", err);
-                eventSource.close()
+                const div = document.createElement('div');
+                div.className = 'message';
+                div.textContent = "Connectionlost !";
+                log.prepend(div);
             };
         </script>
     </body>
