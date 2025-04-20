@@ -21,31 +21,30 @@
     </head>
     <body>
         <h1> Kafka Message Stream</h1>
-        <div id="events"></div>
+        <div id="messages" style="font-family: monospace;"></div>
 
         <script>
             const eventSource = new EventSource('/stream');
 
             eventSource.onmessage = function(e) {
+                console.log("Received SSE:", e.data);
                 const parsed = JSON.parse(e.data);
-                const type = parsed.type;
-                const msg = parsed.data;
-                const time = parsed.time;
+                console.log("Parsed:", parsed);
 
-                const row = document.createElement("div");
-                row.textContent = `[${type.toUpperCase()}] $time: ${msg}`;
-                document.getElementById("events").appendChild(row);
+                const msg = `[${parsed.ts}] ${parsed.username} -> ${parsed.event}`;
+                const el = document.createElement("div");
+                el.textContent = msg;
+
+                document.getElementById("messages").appendChild(el);
             };
 
-            //
-            eventSource.onerror = function(event) {
-                console.error("EventSource failed:", err);
-                const div = document.createElement('div');
-                div.className = 'message';
-                div.textContent = "Connectionlost !";
-                log.prepend(div);
-            };
-            //
+            // eventSource.onerror = function(event) {
+            //     console.error("EventSource failed:", err);
+            //     const div = document.createElement('div');
+            //     div.className = 'message';
+            //     div.textContent = "Connectionlost !";
+            //     log.prepend(div);
+            // };
         </script>
     </body>
 </html>

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -28,9 +27,9 @@ type KafkaMessage struct {
 }
 
 type EventPayload struct {
-	User      string `json:"user"`
-	Event     string `json:"event"`
-	TimeStamp string `json:"timestamp"`
+	User      string    `json:"username"`
+	Event     string    `json:"event"`
+	TimeStamp time.Time `json:"ts"`
 }
 
 func main() {
@@ -102,53 +101,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "message sent"})
 	})
 	router.GET("/consume", consumeHandler)
-	router.GET("/stream", func(c *gin.Context) {
-		c.Writer.Header().Set("Content-Type", "text/event-stream")
-		c.Writer.Header().Set("Cache-Control", "no-cache")
-		c.Writer.Header().Set("Connection", "keep-alive")
-
-		//Fetching past events from DB
-		rows, err := db.Query("SELECT id, username, event, ts FROM kafka_events ORDER BY id DESC LIMIT 100")
-		if err != nil {
-			log.Println("DB query error:", err)
-			return
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var id int
-			var message string
-			var created time.Time
-			rows.Scan(&id, &message, &created)
-
-			c.SSEvent("message", gin.H{
-				"type": "past",
-				"data": message,
-				"time": created,
-			})
-		}
-
-		//Now stream new messages from Kafka
-		go func() {
-			for {
-				msg, err := kafkaReader.ReadMessage(context.Background())
-				if err != nil {
-					log.Println("Kafka error:", err)
-					break
-				}
-
-				c.SSEvent("message", gin.H{
-					"type": "live",
-					"data": string(msg.Value),
-					"time": time.Now(),
-				})
-				c.Writer.Flush()
-			}
-		}()
-
-		//keeping connection open
-		<-c.Request.Context().Done()
-	})
+	router.GET("/stream", streamHandler)
 
 	router.LoadHTMLFiles("web/dashboard.html")
 	router.GET("/dashboard", func(c *gin.Context) {
@@ -240,6 +193,37 @@ func streamHandler(c *gin.Context) {
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Flush()
 
+	ctx := c.Request.Context()
+
+	//Fetching past events from DB
+	log.Println("Fetching past events from DB...")
+	rows, err := db.Query("SELECT username, event, ts FROM kafka_events ORDER BY id DESC LIMIT 100")
+	if err != nil {
+		log.Println("DB query error:", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+
+		var username, event string
+		var ts time.Time
+
+		log.Printf("Sending past: user=%s event=%s time=%s\n", username, event, ts)
+
+		if err := rows.Scan(&username, &event, &ts); err == nil {
+			payload := EventPayload{
+				User:      username,
+				Event:     event,
+				TimeStamp: time.Now(),
+			}
+			jsonData, _ := json.Marshal(payload)
+			c.Writer.Write([]byte("data: " + string(jsonData) + "\n\n"))
+			c.Writer.Flush()
+		}
+	}
+
+	//Kafka Reader Setup
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:  []string{"localhost:9092"},
 		Topic:    "test-topic",
@@ -247,43 +231,51 @@ func streamHandler(c *gin.Context) {
 		MinBytes: 1,
 		MaxBytes: 10e6,
 	})
-
 	defer reader.Close()
 
-	ctx := c.Request.Context()
+	//Now stream new messages from Kafka
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				log.Println("Client disconnected")
+				return
+			default:
+				msg, err := reader.ReadMessage(ctx)
+				log.Printf("Received Kafka msg: %s\n", string(msg.Value))
+				if err != nil {
+					log.Printf("Kafka read error: %v\n", err)
+					time.Sleep(1 * time.Second)
+					continue
+				}
 
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("Client disconnected")
-			return
-		default:
-			msg, err := reader.ReadMessage(ctx)
-			if err != nil {
-				log.Printf("Kafka read error: %v\n", err)
-				time.Sleep(1 * time.Second) // Sleep for a second before retrying
-				continue
+				//Unmarshal kafka message into struct
+				var payload EventPayload
+				log.Printf("Parsed payload: %+v\n", payload)
+				if err := json.Unmarshal(msg.Value, &payload); err != nil {
+					log.Println("Invalid Kafka JSON:", err)
+					continue
+				}
+
+				//Save to DB
+				log.Println("Inserting to DB...")
+				_, err = db.Exec(`INSERT INTO kafka_events(username, event, ts) VALUES ($1, $2, $3)`, payload.User, payload.Event, payload.TimeStamp)
+				if err != nil {
+					log.Println("DB insert error:", err)
+					continue
+				}
+
+				//Send to frontend
+				jsonData, _ := json.Marshal(payload)
+				log.Println("Streaming to client...")
+				c.Writer.Write([]byte("data: " + string(jsonData) + "\n\n"))
+				c.Writer.Flush()
 			}
-
-			//Parse message JSON
-			var payload EventPayload
-			err = json.Unmarshal(msg.Value, &payload)
-			if err != nil {
-				log.Println("Invalid JSON in Kafka message:", err)
-				continue
-			}
-
-			//Inserting into DB
-			_, err = db.Exec(`INSERT INTO kafka_events(username, event, ts) VALUES ($1, $2, $3)`, payload.User, payload.Event, payload.TimeStamp)
-			if err != nil {
-				log.Println("DB insert error:", err)
-				continue
-			}
-
-			//Stream to browser
-			jsonData, _ := json.Marshal(payload)
-			data := fmt.Sprintf("data: %s\n\n", jsonData)
-			_, err = c.Writer.Write([]byte(data))
 		}
-	}
+	}()
+
+	//keeping connection open
+	<-ctx.Done()
+	log.Println("Closed SSE stream")
+
 }
