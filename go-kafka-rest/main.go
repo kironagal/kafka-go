@@ -16,6 +16,7 @@ import (
 )
 
 var kafkaWriter *kafka.Writer
+var kafkaReader *kafka.Reader
 var db *sql.DB
 
 type KafkaMessage struct {
@@ -40,6 +41,16 @@ func main() {
 		Balancer: &kafka.LeastBytes{},
 	})
 
+	//Setting up Kafka reader
+	kafkaReader = kafka.NewReader(kafka.ReaderConfig{
+		Brokers:   []string{"localhost:9092"},
+		Topic:     "test-topic",
+		GroupID:   "go-api-consumer",
+		Partition: 0,
+		MinBytes:  10e3,
+		MaxBytes:  10e6,
+	})
+
 	defer kafkaWriter.Close()
 
 	var err error
@@ -58,7 +69,6 @@ func main() {
 	router := gin.Default()
 
 	//Route to handle produce Kafka message
-	//router.POST("/produce", produceHandler)
 	router.POST("/produce", func(c *gin.Context) {
 		var payload EventPayload
 		if err := c.BindJSON(&payload); err != nil {
@@ -92,9 +102,55 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "message sent"})
 	})
 	router.GET("/consume", consumeHandler)
-	router.GET("/stream", streamHandler)
-	//router.StaticFile("/dashboard", "./web/dashboard.html")
-	router.LoadHTMLFiles("./web/dashboard.html")
+	router.GET("/stream", func(c *gin.Context) {
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+
+		//Fetching past events from DB
+		rows, err := db.Query("SELECT id, username, event, ts FROM kafka_events ORDER BY id DESC LIMIT 100")
+		if err != nil {
+			log.Println("DB query error:", err)
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var id int
+			var message string
+			var created time.Time
+			rows.Scan(&id, &message, &created)
+
+			c.SSEvent("message", gin.H{
+				"type": "past",
+				"data": message,
+				"time": created,
+			})
+		}
+
+		//Now stream new messages from Kafka
+		go func() {
+			for {
+				msg, err := kafkaReader.ReadMessage(context.Background())
+				if err != nil {
+					log.Println("Kafka error:", err)
+					break
+				}
+
+				c.SSEvent("message", gin.H{
+					"type": "live",
+					"data": string(msg.Value),
+					"time": time.Now(),
+				})
+				c.Writer.Flush()
+			}
+		}()
+
+		//keeping connection open
+		<-c.Request.Context().Done()
+	})
+
+	router.LoadHTMLFiles("web/dashboard.html")
 	router.GET("/dashboard", func(c *gin.Context) {
 		c.HTML(200, "dashboard.html", nil)
 	})
@@ -208,9 +264,6 @@ func streamHandler(c *gin.Context) {
 				time.Sleep(1 * time.Second) // Sleep for a second before retrying
 				continue
 			}
-
-			// data := fmt.Sprintf("data:%s\n\n", msg.Value)
-			// _, err = c.Writer.Write([]byte(data))
 
 			//Parse message JSON
 			var payload EventPayload
